@@ -1,0 +1,456 @@
+library(readstata13)
+library(sjlabelled)
+library(readxl)
+library(stringr)
+library(broom)
+setwd("F:\\OneDrive\\graduate\\my_research\\In_progress\\heatwave\\")
+datapath <- ("F:\\OneDrive\\graduate\\data\\CHARLS\\")
+temppath <- ("F:/OneDrive/graduate/my_research/In_progress/heatwave/000data/weather data/00waste/CnOpendata_weather/")
+
+#######################################
+#### Variable and Sample Selection #### 
+#######################################
+
+## Merge temperature data with city data and calculate Heatwave 
+# find city list
+data.psu <- read.dta13(paste0(datapath,"2011 Wave1\\data 20130312\\psu.dta"))
+data.psu[81,3] <- "哈尔滨市"
+city <- as.data.frame(unique(data.psu$city))
+names(city) <- "name"
+city$no <- seq(1, nrow(city))
+
+# import temp data
+file <- list.files(temppath)
+data.temp <- data.frame()
+for (i in file[-1]){
+  data.temp <- rbind(data.temp, read_xlsx(paste0(temppath, i), range = cell_cols("A:F"), col_names = FALSE))
+  print(paste(i, "is added"))
+}
+names(data.temp) <- c("Province", "City", "County", "Date", "H_temp", "L_temp")
+rm(i)
+# keep only obs between 2018-06-01 and 2018-08-31)
+data.temp$Date <- as.Date(data.temp$Date, "%Y-%m-%d")
+data.temp <- subset(data.temp, Date >= "2018-06-01" & Date <= "2018-08-31")
+data.temp$H_temp <- gsub("℃", "", data.temp$H_temp)
+data.temp$L_temp <- gsub("℃", "", data.temp$L_temp)
+data.temp$H_temp <- as.numeric(data.temp$H_temp)
+data.temp$L_temp <- as.numeric(data.temp$L_temp)
+# calculate city level mean high temperature and low temperature
+data.temp.new <- aggregate(cbind(H_temp, L_temp) ~ City + Date, data.temp, mean)
+
+# merge temp data and city data
+unique(data.temp$City)
+city$name_new <- gsub("市|地区|盟|土家族苗族自治州|藏族自治州|彝族自治州|苗族自治州|侗族自治州
+                      |苗族侗族自治州|布依族苗族自治州","", city$name)
+city[!is.element(city$name_new, data.temp$City),] 
+city[14,3] <- "兴安盟"
+city[76,3] <- "襄阳"
+data.JiuJ <- read_xlsx(paste0(temppath, "JiuJiang.xlsx")) 
+data.JiuJ$H_temp <- gsub("°", "", data.JiuJ$H_temp)
+data.JiuJ$L_temp <- gsub("°", "", data.JiuJ$L_temp)
+data.JiuJ$H_temp <- as.numeric(data.JiuJ$H_temp)
+data.JiuJ$L_temp <- as.numeric(data.JiuJ$L_temp)
+data.JiuJ$Date <- as.Date(data.JiuJ$Date, "%Y-%m-%d")
+data.temp.new <- rbind(data.temp.new, data.JiuJ)
+rm(data.JiuJ)
+data.temp.use <- merge(data.temp.new, city, by.x = "City", by.y = "name_new", all.x = TRUE)
+# find the city we need
+data.temp.use <- subset(data.temp.use, is.na(name) == FALSE)
+summary(data.temp.use) # final temperature data, 124 cities * 72 days, no ChaoHu
+
+# find missing days
+# temp <- subset(data.temp.use, select = c(Date, H_temp, L_temp, name))
+# date_range <- seq(min(temp$Date), max(temp$Date), by = 1) 
+
+
+# calculate heatwave
+data.temp.use <- data.temp.use[order(data.temp.use$no, data.temp.use$Date),]
+data.temp.use$month <- format(data.temp.use$Date, "%m")
+# calculate quantile
+data.q <- aggregate(H_temp ~ City + month, data.temp.use,  quantile, probs = c(90, 95, 98)/100)
+data.q <- cbind(data.q, as.data.frame(data.q$H_temp))
+# 
+data.temp.use <- merge(data.temp.use, data.q[,-3], by = c("City", "month"))
+rm(data.q)
+names(data.temp.use)[8:10] <- c("q_90", "q_95", "q_98")
+data.temp.use$exceed_35 <- with(data.temp.use, H_temp >= 35) # yellow warning
+data.temp.use$exceed_37 <- with(data.temp.use, H_temp >= 37) # orange warning
+data.temp.use$exceed_40 <- with(data.temp.use, H_temp >= 40) # red warning
+data.temp.use$exceed_q90 <- with(data.temp.use, H_temp >= data.temp.use$q_90)
+data.temp.use$exceed_q95 <- with(data.temp.use, H_temp >= data.temp.use$q_95)
+data.temp.use$exceed_q98 <- with(data.temp.use, H_temp >= data.temp.use$q_98)
+
+
+data.month <- aggregate(cbind(exceed_35, exceed_37, exceed_40, exceed_q90, exceed_q95, exceed_q98)
+                        ~ City + month, data.temp.use, sum)
+colnames(data.month)[3:8] <- c("Days_Yellow", "Days_Orange", "Days_Red", 
+                               "Days_q90", "Days_q95", "Days_q98")
+# create a function to convert logical value sequence to string
+log2seq <- function(log){
+  log <- as.integer(log)
+  log <- as.character(log)
+  log <- toString(log)
+  seq <- gsub(", ", "", log)
+  return(seq)
+}
+data.month <- merge(data.month, aggregate(cbind(exceed_35, exceed_37, exceed_40, exceed_q90, exceed_q95, exceed_q98)
+                                          ~ City + month, data.temp.use, log2seq), all = TRUE)
+data.month$Warn_Yellow <- str_count(data.month$exceed_35, "[1]{3,}")
+rm(data.temp, data.temp.new)
+
+
+## merge 2018 individual data and select samples
+data_list_18 <- list.files(paste0(datapath, "2018 Wave4\\data 20200913\\"))
+# read all 2018 sub-data
+for(i in data_list_18){
+  temp <- read.dta13(paste0(datapath,"2018 Wave4\\data 20200913\\", i))
+  temp <- set_label(temp, varlabel(temp))
+  assign(paste0(gsub(".dta", "", i), "_18"), temp)
+  print(paste0(i, " has been imported"))
+}
+merge_list_18 <- c("Sample_Infor_18", "Demographic_Background_18", "Family_Information_18",
+                   "Family_Transfer_18","Health_Status_and_Functioning_18", "Cognition_18", 
+                   "Insider_18", "Health_Care_and_Insurance_18", "Work_Retirement_18", "Pension_18",
+                   "Household_Income_18", "Individual_Income_18", "Housing_18", "Weights_18")
+# merge data in the order in questionnaire.
+# versionID maybe different in sub-data, so it need to be moved before merging.
+# Merging Family_Information and Family_Transfer all would result in increased obs, so use all.x = T
+# 1. check the intersection in datalist names. Found duplicated xrtype, xrgender, and ziwtime.
+for(i in 1:(length(merge_list_18) - 1)){
+  for(j in (i+1):length(merge_list_18)){
+    print(c(merge_list_18[i], merge_list_18[j],
+            intersect(names(get(merge_list_18[i])), names(get(merge_list_18[j])))))
+  }
+}
+# merge the data.
+Indi_18 <- subset(Sample_Infor_18, select = -c(versionID))
+for(i in c(2:10, 12, 14)){
+  Indi_18 <- merge(Indi_18, subset(get(merge_list_18[i]), select = -c(versionID)), 
+                   by = c("ID", "householdID", "communityID"), all.x = T)
+  print(paste0(i, " has been merged!"))
+}
+# Delete duplicated xrtype, xrgender, and ziwtime
+dup_xrtype <- grep("xrtype", names(Indi_18))
+dup_xrgender <- grep("xrgender", names(Indi_18))
+dup_ziwtime <- grep("ziwtime", names(Indi_18))
+Indi_18$xrtype <- apply(Indi_18[,dup_xrtype], 1, max, na.rm = T)
+Indi_18$xrgender <- apply(Indi_18[,dup_xrgender], 1, max, na.rm = T)
+Indi_18$ziwtime <- apply(Indi_18[,dup_ziwtime], 1, max, na.rm = T)
+Indi_18 <- Indi_18[,-c(dup_xrtype, dup_xrgender, dup_ziwtime)]
+rm(list = merge_list_18, i, j, temp, merge_list_18, data_list_18, dup_xrgender, dup_xrtype, dup_ziwtime)                                                            
+# select related variabes in 2018
+sp.list <- grep("da05[1-7]{1}", names(Indi_18), value = T) # social participation related variables
+mh.list <- grep("dc0[0,1,2]{1}[0-9]{1}", names(Indi_18), value = T)  # mental health related variables, MMSE and CESD
+de.list <- grep("ba|bb00[0,1]{1}", names(Indi_18), value = T) # other demographic variables, age, gender, living status, now living place, if_local
+sample.list <- c("ID", "householdID", "communityID", "xrtype", "xrgender", "died", "imonth")# Individual, household and community ID
+data <- Indi_18[,c(sample.list, de.list, sp.list, mh.list)]
+## sample selection
+# find those who no longer living in this community
+table(data$bb001_w3) # live in the same place as last survey
+anyNA(data$bb001_w3)
+# find those who changed the address in 2015
+data.15 <- read.dta13(paste0(datapath,"2015 Wave3\\data 20190620\\Demographic_Background.dta"))
+data.15 <- set_label(data.15, varlabel(data.15))
+table(is.na(data.15$bb001_w3)) # 34 missing value, almost missing the whole Demographic Background section
+data <- merge(data, data.15[,c("ID", "bb001_w3", "xrtype")], by = "ID", all.x = TRUE, suffixes = c(".18", ".15"))
+table(is.na(data$bb001_w3.15)) # weird, there is much more lost than died.18 + new.18
+# find those who changed the address in 2013
+data.13 <- read.dta13(paste0(datapath,"2013 Wave2\\data 20151118\\Demographic_Background.dta"))
+data.13 <- set_label(data.13, varlabel(data.13))
+table(data.13$bb000_w2_1)
+data <- merge(data, data.13[,c("ID", "bb000_w2_1", "xrtype")], by = "ID", all.x = TRUE)
+# delete those who died in 2018
+table(data$died)
+data <- subset(data, died == "0 Alive") # remove 997 died, 19816 case remain
+# delete those who do not live in this community in 2018
+table(data$bb001_w3.18)
+anyNA(data$bb001_w3.18)
+data <- subset(data, bb001_w3.18 == "1 Address during Last Survey")
+# delete those who do not live in this community or NA in 2015
+table(data$bb001_w3.15)
+anyNA(data$bb001_w3.15)
+table(is.na(data$bb001_w3.15)) # many NA, not new sample in 2018, so deleted
+data <- subset(data, bb001_w3.15 == 1)
+# delete those who do not live in this community in 2013
+table(data$bb000_w2_1)
+table(is.na(data$bb000_w2_1), data$xrtype.15) # many NA, only 202 is new sample in 2018, so delete all
+data <- subset(data, bb000_w2_1 == "1 The Same Address")
+# delete those who do not live in household in 2
+table(data$bb001_w3_1)
+data <- subset(data, bb001_w3_1 == "1 Family Housing")
+# delete those who accept interview at 9 or 11
+table(data$imonth)
+data <- subset(data, imonth != "09" & imonth != "11")
+rm(data.13, data.15)
+
+
+## Merge individual data with temp data
+# merge psu with temperature data
+data.psu$ifurban <- with(data.psu, urban_nbs == "Urban")
+city <- merge(city, data.month, by.x = "name_new", by.y = "City", all = TRUE)
+data.commu <- merge(data.psu, city, by.x = "city", by.y = "name", all = TRUE)
+# merge psu with individual data
+data$temp_month <- as.integer(data$imonth) # calculate temp of this month
+table(data$imonth)
+data.commu$month <- as.integer(data.commu$month)
+#42 deleted because of living in ChaoHu
+data <- merge(data, data.commu, by.x = c("communityID", "temp_month"), by.y = c("communityID", "month"))
+
+
+
+# ## Merge community level data with individual data. Too many NA, abandon this part.
+# # duplicate community data
+# data.community <- read.dta13(paste0(datapath,"2011 Wave1\\data 20130312\\community.dta"))
+# temp1 <- subset(data.community, sub_commuID != "")
+# temp2 <- subset(data.community, sub_commuID == "01", select = -c(ja003_2, jc001))
+# temp2 <- merge(temp2, aggregate(temp1[,c("ja003_2","jc001")], list(temp1[,1]), sum), by.x = "communityID", 
+#                by.y = "Group.1")
+# data.community <- subset(data.community, sub_commuID == "")
+# data.community <- rbind(data.community, temp2)
+# rm(temp1, temp2)
+# # Merge
+# data <- merge(data, subset(data.community, select = c("communityID", "ja001", "ja003_1", "ja003_2", "jb030",
+#                                                       "jb037", "jc001")), by = "communityID", all.x = TRUE)
+# rm(data.community)
+# lapply(data[grep("^j", names(data), value = TRUE)], summary)
+
+##########################
+##### USE THIS DATA ######
+##########################
+# data.backup <- data
+
+##############################
+###### Variable Cleaning #####
+##############################
+## Control Variables
+# sex
+table(data$ba000_w2_3)
+anyNA(data$ba000_w2_3)
+data$sex <- data$ba000_w2_3
+summary(data$sex)
+# age
+anyNA(data$ba004_w3_1) # ID birth data
+table(is.na(data$ba004_w3_1))
+table(data$ba005_w4) # true birth date identical with ID birth date?
+table(data$ba002_1) # true birth date
+data$age <- ifelse(data$ba005_w4 == "2 Different" & is.na(data$ba002_1) == T, data$ba002_1, data$ba004_w3_1)
+table(is.na(data$age), data$ba001) # remain to delete
+data$age <- 2018 - data$age
+summary(data$age)
+# household capacity
+household <- read.dta13((paste0(datapath,"2018 Wave4\\data 20200913\\Family_Information.dta")))
+house.cap <- household[, grep("householdID|cv009|^a001_w4|^a005_w3", names(household))]
+house.cap$cap <- rowSums(!is.na(house.cap[,2:66]))
+house.cap$spouse <- !is.na(house.cap$cv009)
+data <- merge(data, house.cap[,c("householdID", "cap", "spouse")], by = "householdID", all.x = TRUE)
+rm(house.cap, household)
+table(is.na(data$cap), is.na(data$spouse)) 
+# self rated health, too many NA
+data <- merge(data, Indi_18[,c("ID", "da002", "db032")], by = "ID", all.x = TRUE)
+summary(data$da002)
+data$self_health <- data$da002
+# indoor interviewer feel temperature
+house.18 <- read.dta13(paste0(datapath,"2018 Wave4\\data 20200913\\Housing.dta"))
+house.18 <- set_label(house.18, varlabel(house.18))
+data <- merge(data, subset(house.18, select = c("householdID", "i026")), by = "householdID", all.x = TRUE)
+rm(house.18)
+data$indoor_temp <- data$i026
+summary(data$indoor_temp)
+data$indoor_temp[is.na(data$indoor_temp)] <- "6 Not Applicable"
+# community_location
+summary(data$urban_nbs)
+# Working Status
+data <- merge(data, Indi_18[c("ID", "fc008", "fc001", "fa002_w4", "fa003")], by = "ID")
+summary(data$fa002_w4)
+data$agri_work <- data$fc008 == "1 Yes" | data$fc001 == "1 Yes"
+data$non_agri <- data$fa002_w4 == "1 Yes" | data$fa003 == "1 Yes"
+table(is.na(data$agri_work), is.na(data$non_agri)) # shared missing value
+table(data$agri_work, data$non_agri)
+# factor(levels = c("No Work", "Agriculture", "Non-Agriculture"))
+
+## Dependent Variables: depression
+lapply(data[paste0("dc",formatC(seq(9,18), width = 3, flag = 0))], summary)
+data.dep <- data[c("ID",paste0("dc",formatC(seq(9,18), width = 3, flag = 0)))]
+data.dep <- cbind(data.dep, as.data.frame(lapply(data.dep[2:11], as.numeric)))
+data <- merge(data, data.dep[, c(1,12:21)], by = "ID", all.x = TRUE)
+data$depression <- rowSums(data[c("dc009.y", "dc010.y", "dc011.y", "dc012.y", "dc014.y", "dc015.y", "dc017.y", "dc018.y")])
+data$depression <- data$dep - data$dc013.y - data$dc016.y
+summary(data$depression)
+rm(data.dep)
+## Mediating Variables
+summary(data$da056_s1) # 26 NA for every item 
+summary(data$da057_1_)
+# data.temp <- data[c("ID", grep("da05[6,7]{1}_[^w]", names(data), value = TRUE))]
+# data.temp <- subset(data.temp, is.na(da056_s1) == FALSE)
+# summary(data.temp$da056_s11)
+# for (i in 1:8){
+#   data.temp[ncol(data.temp)+1] <- (as.integer(data.temp[[paste0("da056_s",i)]]) - i) * 
+#                                   (4 - as.integer(data.temp[[paste0("da057_",i,"_")]]))
+#   data.temp[is.na(data.temp[[ncol(data.temp)]]) & data.temp[[paste0("da056_s",i)]] != "0 No", ncol(data.temp)] <- 1
+# }
+# lapply(data.temp[paste0("V",seq(25,32))],table)
+# data.temp$participation <- rowSums(data.temp[paste0("V",seq(25,32))], na.rm = TRUE) 
+# data <- merge(data, data.temp[,c("ID","participation")], by = "ID", all.x = TRUE)
+# rm(data.temp)
+# summary(data$participation)
+attach(data)
+data$count_parti <- (da056_s1 != "0 No") + (da056_s1 != "0 No") + (da056_s3 != "0 No") + (da056_s4 != "0 No") +
+                           (da056_s5 != "0 No") + (da056_s6 != "0 No") + (da056_s7 != "0 No") + (da056_s8 != "0 No")
+detach(data)
+## Delete NA
+# delete db032 == 3 or 4 first
+summary(data$db032)
+data <- subset(data, db032 == "1 Never" | db032 == "2 A Few Times")
+# delete missing control variables
+summary(data$age) # missing missing value
+summary(data$sex)
+summary(data$cap) # missing
+summary(data$self_health) # missing
+summary(data$indoor_temp)
+summary(data$ifurban)
+summary(data$agri_work) # ?????
+data <- subset(data, is.na(age) != TRUE & is.na(cap) != TRUE & is.na(self_health) != TRUE & is.na(agri_work) != TRUE)
+# no missing independent variables
+# delete missing dependent variables and 8 or 9
+lapply(data[paste0("dc",formatC(seq(9,18), width = 3, flag = 0), ".y")], summary)
+table(data$dc018.y, data$db032, useNA = "ifany")
+data <- subset(data, is.na(dc009.y) == FALSE) # 246 NA for depression scale
+lapply(data[paste0("dc",formatC(seq(9,18), width = 3, flag = 0), ".y")], summary)
+data <- subset(data, dc009.y <= 4 & dc010.y <= 4 & dc011.y <= 4 & dc012.y <= 4 & dc013.y <= 4 &
+               dc014.y <= 4 & dc015.y <= 4 & dc016.y <= 4 & dc017.y <= 4 & dc018.y <= 4)
+data.backup <- data
+##############################
+#### Variable Description ####
+##############################
+data <- subset(data, age >= 55)
+data$self_health_T <- relevel(data$self_health, ref = "5 Very Poor")
+data$indoor_temp_T <- relevel(data$indoor_temp, ref = "3 Bearable")
+library(ltm)
+cronbach.alpha(data[paste0("dc",formatC(seq(9,18), width = 3, flag = 0),".y")]) # 0.683 for depression scale, acceptable
+hist(data$age)
+hist(data$cap)
+hist(data$depression)
+qqnorm(data$depression)
+# qqline(data$depression)
+library(vtable)
+st(data, vars = c("depression", "Days_Orange", "Count_parti", "age", "sex", "agri_work", "non_agri",
+                  "urban_nbs", "cap", "self_health_T", "indoor_temp_T"))
+table(data$count_parti)
+mean(data$count_parti)
+sd(data$count_parti)
+cor.test(data$Days_Orange, data$age)
+
+##################
+###### Model #####
+##################
+library(car)
+library(emmeans)
+## Moderating Model of social participation
+yx0.model <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs, data)
+yx1.model <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs + Days_Orange, data)
+
+yx2.model <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs + count_parti, data)
+
+yx12.model <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                   urban_nbs + Days_Orange * count_parti, data)
+summary(yx0.model)
+cbind(coef(yx0.model), confint(yx2.model, level = 0.95))
+summary(yx1.model)
+cbind(coef(yx1.model), sqrt(diag(vcov(yx1.model))), confint(yx1.model, level = 0.95))
+summary(yx2.model)
+cbind(coef(yx2.model), confint(yx2.model, level = 0.95))
+summary(yx12.model)
+cbind(coef(yx12.model), confint(yx12.model, level = 0.95))
+
+vif(yx0.model)
+vif(yx1.model)
+vif(yx2.model)
+vif(yx12.model)
+
+## sensitivity analysis
+# 1. dichotomize depression. OK
+data$depression2 <- data$depression >= 12
+table(data$depression2)
+library(glm)
+s1.yx0 <- glm(depression2 ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs, data, family = "binomial")
+summary(s1.yx0)
+s1.yx1 <- glm(depression2 ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs + Days_Orange, data, family = "binomial")
+summary(s1.yx1)
+s1.yx2 <- glm(depression2 ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                  urban_nbs + count_parti, data, family = "binomial")
+summary(s1.yx2)
+s1.yx12 <- glm(depression2 ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                   urban_nbs + Days_Orange * count_parti, data, family = "binomial")
+summary(s1.yx12)
+
+# 2. Other heatwave criteria. 90, 95, 98 both not OK
+s2.yx0 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+              urban_nbs, data)
+summary(s2.yx0)
+s2.yx1 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+              urban_nbs + Days_q90, data)
+summary(s2.yx1)
+s2.yx2 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+              urban_nbs + count_parti, data)
+summary(s2.yx2)
+s2.yx12 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+               urban_nbs + Days_q90 * count_parti, data)
+summary(s2.yx12)
+
+# 3. 2015 depreesion situation
+data.15 <- read.dta13(paste0(datapath,"2015 Wave3\\data 20190620\\Health_Status_and_Functioning.dta"))
+data.15 <- set_label(data.15, varlabel(data.15))
+data.15 <- data.15[c("ID",paste0("dc",formatC(seq(9,18), width = 3, flag = 0)))]
+data.15 <- cbind(data.15, as.data.frame(lapply(data.15[2:11], as.numeric)))
+data.15 <- data.15[,-c(2:11)]
+data.15$depression <- rowSums(data.15[c("dc009", "dc010", "dc011", "dc012", "dc014", "dc015", "dc017", "dc018")])
+data.15$depression <- data.15$depression - data.15$dc013 - data.15$dc016
+summary(data$depression)
+data.15 <- subset(data.15, dc009 <= 4 & dc010 <= 4 & dc011 <= 4 & dc012 <= 4 & dc013 <= 4 &
+                 dc014 <= 4 & dc015 <= 4 & dc016 <= 4 & dc017 <= 4 & dc018 <= 4)
+data.15 <- subset(data.15, is.na(dc009) == FALSE)
+data.15 <- data.15[,-c(2:11)]
+colnames(data.15)[2] <- "depression15"
+data.w34 <- merge(data, data.15, by = "ID")
+w34.yx0 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+               urban_nbs + depression15, data.w34)
+summary(w34.yx0)
+w34.yx1 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+               urban_nbs + Days_Orange + depression15, data.w34)
+summary(w34.yx1)
+w34.yx2 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+               urban_nbs + count_parti + depression15, data.w34)
+summary(w34.yx2)
+w34.yx12 <- lm(depression ~ age + sex + agri_work + non_agri + cap + self_health_T + indoor_temp_T + 
+                urban_nbs + Days_Orange * count_parti + depression15, data.w34)
+summary(w34.yx12)
+
+
+## Plot
+library(emmeans)
+library(ggplot2)
+m_Days_Orange <- mean(data$Days_Orange)
+sd_Days_Orange <- sd(data$Days_Orange)
+m_parti <- mean(data$count_parti)
+sd_parti <- sd(data$count_parti)
+
+emmip(yx12.model, count_parti ~ Days_Orange, cov.keep = 3, at = list(
+  Days_Orange = c(m_Days_Orange - sd_Days_Orange, m_Days_Orange, m_Days_Orange + sd_Days_Orange),
+  count_parti = c(m_parti - sd_parti, m_parti, m_parti + sd_parti)), CIs = F,
+  xlab = "Heatwaves", ylab = "Predicted Depressive Symptoms") +
+  scale_color_manual(name = "",
+                     labels = c("Low Social Participation", "Mean Social Participation", "High Social Participation"),
+                     values = c("black", "grey40", "grey80")) +
+  geom_line(size = 0.8) +
+  theme_classic() +
+  scale_x_continuous(breaks = c(m_Days_Orange - sd_Days_Orange, m_Days_Orange, m_Days_Orange + sd_Days_Orange),
+                     labels = c("Low", "Mean", "High")) +
+  theme(axis.title = element_text(size = 10),
+        axis.ticks.x = element_blank())
+  
+
