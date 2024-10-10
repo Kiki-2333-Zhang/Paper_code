@@ -7,7 +7,6 @@ library(readstata13)
 ##### Find City Needed ##### 
 china_city <- read_sf("F:/OneDrive/graduate/data/China/TianDiTu/GS（2024）0650/市.shp")
 names(china_city)[1:4] <- c("city", "cityN", "province", "provinceN")
-china_city <- china_city[china_city$city != "三沙市" & china_city$province != "台湾省",]
 
 data.psu <- read.dta13("F:/OneDrive/graduate/data/CHARLS/2011 Wave1/data 20130312/psu.dta")
 city <- as.data.frame(unique(data.psu$city))
